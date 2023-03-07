@@ -18,6 +18,8 @@ Amplify Params - DO NOT EDIT */
 const AWS = require('aws-sdk');
 const crypto = require('crypto');
 const qs = require('querystring');
+const jwt_decode = require('jwt-decode');
+const AmazonCognitoIdentity = require('amazon-cognito-identity-js');
 
 var kmsClient = new AWS.KMS();
 
@@ -54,6 +56,27 @@ async function decryptToken(token) {
 			}
 		});
 	});
+}
+
+async function asyncAuthenticateUser(cognitoUser, cognitoAuthenticationDetails) {
+	return new Promise(function (resolve, reject) {
+		cognitoUser.initiateAuth(cognitoAuthenticationDetails, {
+			onSuccess: resolve,
+			onFailure: reject,
+			customChallenge: resolve
+		})
+	})
+}
+
+async function asyncCustomChallengeAnswer(cognitoUser, challengeResponse) {
+	return new Promise(function (resolve, reject) {
+		cognitoUser.sendCustomChallengeAnswer(challengeResponse, {
+			onSuccess: resolve,
+			onFailure: reject,
+			customChallenge: reject // We do not expect a second challenge
+		},
+			{ name: "value" }) // We could have use that field to pass information
+	})
 }
 
 exports.handler = async (event) => {
@@ -212,6 +235,75 @@ exports.handler = async (event) => {
 			body: JSON.stringify({
 				"access_token": access_token,
 				"id_token": id_token,
+				"token_type": "Bearer"
+			}),
+		};
+	} else if (grant_type === "urn:ietf:params:oauth:grant-type:token-exchange") {
+		var subject_token = jsonBody.subject_token;
+		var subject_token_type = jsonBody.subject_token_type;
+
+		if (subject_token_type !== "urn:ietf:params:oauth:token-type:access_token") {
+			return {
+				statusCode: 400,
+				body: JSON.stringify('Invalid Token Type'),
+			};
+		}
+
+		let tokenDecoded = jwt_decode(subject_token);
+		let tokenUsername = tokenDecoded['username'];
+
+		var authenticationData = {
+			Username: tokenUsername,
+			AuthParameters: {
+				Username: tokenUsername,
+			}
+		};
+
+		var authenticationDetails = new AmazonCognitoIdentity.AuthenticationDetails(authenticationData);
+		var poolData = {
+			UserPoolId: process.env.AUTH_AMPLIFYIDENTITYBROKERAUTH_USERPOOLID,
+			ClientId: client_id
+		};
+		var userPool = new AmazonCognitoIdentity.CognitoUserPool(poolData);
+		var userData = {
+			Username: tokenUsername,
+			Pool: userPool
+		};
+
+		var cognitoUser = new AmazonCognitoIdentity.CognitoUser(userData);
+		cognitoUser.setAuthenticationFlowType("CUSTOM_AUTH");
+
+		try {
+			// Initiate the custom flow
+			await asyncAuthenticateUser(cognitoUser, authenticationDetails);
+
+			// Answer the custom challenge by providing the token
+			var result = await asyncCustomChallengeAnswer(cognitoUser, subject_token);
+
+			var id_token = result.getIdToken().getJwtToken();
+			var access_token = result.getAccessToken().getJwtToken();
+			var refresh_token = result.getRefreshToken().getToken();
+		}
+		catch (error) {
+			console.log("Token swap fail, this may be a tentative of token stealing");
+			return { // Redirect to login page with forced pre-logout
+				statusCode: 302,
+				headers: {
+					Location: '/?client_id=' + client_id + '&redirect_uri=' + redirect_uri + '&authorization_code=' + authorizationCode + '&forceAuth=true' + insertStateIfAny(event),
+				}
+			};
+		}
+
+		return {
+			statusCode: 200,
+			headers: {
+				"Access-Control-Allow-Origin": "*" // Required for CORS support to work
+			},
+			body: JSON.stringify({
+				"access_token": access_token,
+				"id_token": id_token,
+				"refresh_token": refresh_token,
+				"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
 				"token_type": "Bearer"
 			}),
 		};

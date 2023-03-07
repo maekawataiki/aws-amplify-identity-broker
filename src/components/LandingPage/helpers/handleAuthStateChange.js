@@ -21,6 +21,7 @@ const handleAuthUIStateChange = async (authState) => {
 		var authorization_code;
 		var clientState;
 		let queryStringParams = new URLSearchParams(window.location.search);
+		let clientID = queryStringParams.get('client_id');
 		let qsRedirectUri = queryStringParams.get('redirect_uri');
 		let qsAuthorizationCode = queryStringParams.get('authorization_code');
 		let qsClientState = queryStringParams.get('state');
@@ -71,6 +72,39 @@ const handleAuthUIStateChange = async (authState) => {
 			console.error("Inconsistent application state: Tokens missing from current session");
 			return;
 		}
+
+		/*
+		 * Get Token for client using Token Exchange endpoint
+		 */
+		if (clientID) {
+			let url = "/oauth2/token";
+			let details = {
+				"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+				"subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+				"subject_token": accessToken,
+				"client_id": clientID
+			}
+			var formBody = [];
+			for (var property in details) {
+				var encodedKey = encodeURIComponent(property);
+				var encodedValue = encodeURIComponent(details[property]);
+				formBody.push(encodedKey + "=" + encodedValue);
+			}
+			formBody = formBody.join("&");
+			let opt = {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded" // "application/json"
+				},
+				body: formBody
+			}
+			let res = await fetch(url, opt);
+			let data = await res.json();
+			idToken = data.id_token;
+			accessToken = data.access_token;
+			refreshToken = data.refresh_token;
+		}
+
 
 		if (authorization_code && redirect_uri) {
 			/*
